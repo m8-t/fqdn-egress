@@ -1,0 +1,37 @@
+# fqdn-egress example configuration.
+
+# output: police this machine's own outbound traffic.
+# forward: police traffic routed through this machine (VM tap, bridge).
+mode: output
+
+# Where the built-in DNS proxy listens. In output mode point
+# /etc/resolv.conf at this address. In forward mode use the tap/bridge IP.
+listen: 127.0.0.1:53
+
+# Resolver the proxy forwards allowed queries to.
+upstream: 192.168.1.1:53
+
+allowlist: /etc/fqdn-egress/allowlist.txt
+
+# forward mode only: interfaces whose traffic is policed.
+#interfaces: [tap0]
+
+# Clamp for how long resolved IPs stay reachable (DNS TTL clamped to this).
+ttl:
+  min: 30s
+  max: 1h
+
+# Static accept rules for destinations reached by IP, no DNS involved.
+#carveouts:
+#  - cidr: 172.16.20.80/32
+#    proto: tcp
+#    port: 6443
+
+# Reply for non-allowlisted names: nxdomain or refuse.
+answer: nxdomain
+
+# Prefix for the rate-limited nftables log rule (journalctl -k | grep ...).
+log_prefix: "fqdn-egress-blocked: "
+
+# Optional Prometheus endpoint; empty disables it.
+#metrics_listen: 127.0.0.1:9922

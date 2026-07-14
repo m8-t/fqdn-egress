@@ -1,0 +1,12 @@
+# fqdn-egress allowlist.
+# One name per line. Plain names match exactly; *.example.com matches
+# subdomains of example.com but not example.com itself. Use both lines
+# to cover a domain and everything under it.
+
+github.com
+*.github.com
+githubusercontent.com
+*.githubusercontent.com
+
+# Distro mirrors
+geo.mirror.pkgbuild.com
