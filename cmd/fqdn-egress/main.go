@@ -7,6 +7,7 @@ import (
 
 	"github.com/m8-t/fqdn-egress/internal/allowlist"
 	"github.com/m8-t/fqdn-egress/internal/config"
+	"github.com/m8-t/fqdn-egress/internal/nft"
 )
 
 var version = "dev"
@@ -23,7 +24,11 @@ func main() {
 	switch cmd, args := os.Args[1], os.Args[2:]; cmd {
 	case "check":
 		err = check(args)
-	case "run", "status", "flush":
+	case "status":
+		err = status()
+	case "flush":
+		err = flush()
+	case "run":
 		err = fmt.Errorf("%s: not implemented yet", cmd)
 	case "version":
 		fmt.Println(version)
@@ -64,6 +69,38 @@ func check(args []string) error {
 	fmt.Printf("allowlist: %s (%d entries)\n", cfg.Allowlist, list.Len())
 	fmt.Printf("carveouts: %d\n", len(cfg.Carveouts))
 	fmt.Println("ok")
+	return nil
+}
+
+func status() error {
+	m, err := nft.New()
+	if err != nil {
+		return err
+	}
+	entries, err := m.Entries()
+	if err != nil {
+		return fmt.Errorf("reading set (is the ruleset installed?): %w", err)
+	}
+	if len(entries) == 0 {
+		fmt.Println("no pinned IPs")
+		return nil
+	}
+	fmt.Printf("%-18s %s\n", "IP", "EXPIRES")
+	for _, e := range entries {
+		fmt.Printf("%-18s %s\n", e.IP, e.Expires)
+	}
+	return nil
+}
+
+func flush() error {
+	m, err := nft.New()
+	if err != nil {
+		return err
+	}
+	if err := m.FlushSet(); err != nil {
+		return fmt.Errorf("flushing set (is the ruleset installed?): %w", err)
+	}
+	fmt.Println("pinned IPs cleared")
 	return nil
 }
 
