@@ -3,10 +3,17 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log/slog"
+	"net"
+	"net/netip"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/m8-t/fqdn-egress/internal/allowlist"
 	"github.com/m8-t/fqdn-egress/internal/config"
+	"github.com/m8-t/fqdn-egress/internal/dnsproxy"
 	"github.com/m8-t/fqdn-egress/internal/nft"
 )
 
@@ -29,7 +36,7 @@ func main() {
 	case "flush":
 		err = flush()
 	case "run":
-		err = fmt.Errorf("%s: not implemented yet", cmd)
+		err = run(args)
 	case "version":
 		fmt.Println(version)
 	case "-h", "--help", "help":
@@ -47,7 +54,7 @@ func main() {
 
 func check(args []string) error {
 	fs := flag.NewFlagSet("check", flag.ExitOnError)
-	cfgPath := fs.String("config", defaultConfig, "path to config file")
+	cfgPath := configFlag(fs)
 	fs.Parse(args)
 
 	cfg, err := config.Load(*cfgPath)
@@ -70,6 +77,124 @@ func check(args []string) error {
 	fmt.Printf("carveouts: %d\n", len(cfg.Carveouts))
 	fmt.Println("ok")
 	return nil
+}
+
+func run(args []string) error {
+	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	cfgPath := configFlag(fs)
+	var debug bool
+	fs.BoolVar(&debug, "debug", false, "log at debug level")
+	fs.BoolVar(&debug, "d", false, "shorthand for -debug")
+	fs.Parse(args)
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	list, err := allowlist.Load(cfg.Allowlist)
+	if err != nil {
+		return err
+	}
+
+	level := slog.LevelInfo
+	if debug {
+		level = slog.LevelDebug
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+
+	m, err := nft.New()
+	if err != nil {
+		return err
+	}
+	rs, err := ruleset(cfg)
+	if err != nil {
+		return err
+	}
+	if err := m.Install(rs); err != nil {
+		return err
+	}
+	defer m.Teardown()
+
+	p := dnsproxy.New(dnsproxy.Config{
+		Listen:   cfg.Listen,
+		Upstream: cfg.Upstream,
+		Answer:   cfg.Answer,
+		MinTTL:   time.Duration(cfg.TTL.Min),
+		MaxTTL:   time.Duration(cfg.TTL.Max),
+	}, list, m, log)
+	if err := p.Listen(); err != nil {
+		return err
+	}
+	defer p.Shutdown()
+
+	errc := make(chan error, 1)
+	go func() { errc <- p.Serve() }()
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	log.Info("running", "mode", cfg.Mode, "listen", cfg.Listen,
+		"upstream", cfg.Upstream, "allowlist entries", list.Len())
+
+	for {
+		select {
+		case err := <-errc:
+			return err
+		case s := <-sig:
+			if s == syscall.SIGHUP {
+				l, err := allowlist.Load(cfg.Allowlist)
+				if err != nil {
+					log.Error("allowlist reload failed, keeping old list", "err", err)
+					continue
+				}
+				p.SetAllowlist(l)
+				log.Info("allowlist reloaded", "entries", l.Len())
+				continue
+			}
+			log.Info("shutting down", "signal", s.String())
+			return nil
+		}
+	}
+}
+
+// ruleset translates the config into what nft.Install expects.
+func ruleset(cfg config.Config) (nft.Ruleset, error) {
+	rs := nft.Ruleset{
+		Mode:       cfg.Mode,
+		Interfaces: cfg.Interfaces,
+		LogPrefix:  cfg.LogPrefix,
+		DaemonUID:  -1,
+	}
+	for _, co := range cfg.Carveouts {
+		prefix, err := netip.ParsePrefix(co.CIDR)
+		if err != nil {
+			return rs, fmt.Errorf("carveout %q: %w", co.CIDR, err)
+		}
+		rs.Carveouts = append(rs.Carveouts, nft.Carveout{
+			Prefix: prefix, Proto: co.Proto, Port: co.Port,
+		})
+	}
+
+	// The daemon's own upstream queries must escape the drop chain. A
+	// dedicated non-root user gets a skuid exemption; running as root
+	// that would exempt far too much, so carve out the resolver instead.
+	if uid := os.Getuid(); uid != 0 {
+		rs.DaemonUID = uid
+		return rs, nil
+	}
+	host, _, err := net.SplitHostPort(cfg.Upstream)
+	if err != nil {
+		return rs, fmt.Errorf("upstream: %w", err)
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return rs, fmt.Errorf("upstream %q: %w", host, err)
+	}
+	for _, proto := range []string{"udp", "tcp"} {
+		rs.Carveouts = append(rs.Carveouts, nft.Carveout{
+			Prefix: netip.PrefixFrom(ip, ip.BitLen()), Proto: proto, Port: 53,
+		})
+	}
+	return rs, nil
 }
 
 func status() error {
@@ -104,6 +229,13 @@ func flush() error {
 	return nil
 }
 
+func configFlag(fs *flag.FlagSet) *string {
+	var path string
+	fs.StringVar(&path, "config", defaultConfig, "path to config file")
+	fs.StringVar(&path, "c", defaultConfig, "shorthand for -config")
+	return &path
+}
+
 func usage() {
 	fmt.Fprint(os.Stderr, `usage: fqdn-egress <command> [flags]
 
@@ -115,6 +247,7 @@ commands:
   version  print version
 
 flags:
-  -config path   config file (default `+defaultConfig+`)
+  -c, -config path   config file (default `+defaultConfig+`)
+  -d, -debug         debug logging (run only)
 `)
 }
