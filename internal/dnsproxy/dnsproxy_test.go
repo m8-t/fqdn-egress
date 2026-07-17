@@ -66,7 +66,7 @@ func rr(t *testing.T, s string) dns.RR {
 	return r
 }
 
-func newProxy(t *testing.T, cfg Config, allow string, pin Pinner) *Proxy {
+func newProxy(t *testing.T, cfg Config, allow string, pin Pinner, stats ...Stats) *Proxy {
 	t.Helper()
 	list, err := allowlist.Parse(strings.NewReader(allow))
 	if err != nil {
@@ -85,6 +85,9 @@ func newProxy(t *testing.T, cfg Config, allow string, pin Pinner) *Proxy {
 		cfg.MaxTTL = time.Hour
 	}
 	p := New(cfg, list, pin, slog.New(slog.DiscardHandler))
+	if len(stats) > 0 {
+		p.SetStats(stats[0])
+	}
 	if err := p.Listen(); err != nil {
 		t.Fatal(err)
 	}
@@ -220,6 +223,47 @@ func TestUpstreamFailure(t *testing.T) {
 	resp := query(t, p.Addr(), "example.com", dns.TypeA)
 	if resp.Rcode != dns.RcodeServerFailure {
 		t.Errorf("rcode = %s, want SERVFAIL", dns.RcodeToString[resp.Rcode])
+	}
+}
+
+type fakeStats struct {
+	mu       sync.Mutex
+	verdicts map[string]int
+	rtts     int
+}
+
+func (f *fakeStats) Query(verdict string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.verdicts == nil {
+		f.verdicts = make(map[string]int)
+	}
+	f.verdicts[verdict]++
+}
+
+func (f *fakeStats) Upstream(time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rtts++
+}
+
+func TestStatsRecorded(t *testing.T) {
+	up := upstream(t, map[string][]dns.RR{
+		"example.com.": {rr(t, "example.com. 300 IN A 93.184.216.34")},
+	})
+	stats := &fakeStats{}
+	p := newProxy(t, Config{Upstream: up}, "example.com", &fakePinner{}, stats)
+
+	query(t, p.Addr(), "example.com", dns.TypeA)
+	query(t, p.Addr(), "evil.test", dns.TypeA)
+
+	stats.mu.Lock()
+	defer stats.mu.Unlock()
+	if stats.verdicts["allowed"] != 1 || stats.verdicts["denied"] != 1 {
+		t.Errorf("verdicts = %v", stats.verdicts)
+	}
+	if stats.rtts != 1 {
+		t.Errorf("recorded %d upstream rtts, want 1", stats.rtts)
 	}
 }
 

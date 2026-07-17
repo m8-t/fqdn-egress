@@ -66,6 +66,7 @@ mode: output
 listen: 127.0.0.1:53
 upstream: 10.99.0.1:53
 allowlist: $work/allowlist.txt
+metrics_listen: 127.0.0.1:9922
 EOF
 
 # before the daemon runs, the direct-IP target must be reachable,
@@ -103,6 +104,12 @@ if ip netns exec $client "$work/fqdn-egress" status | grep -q 10.99.0.1; then
 	pass "status lists pinned IP"
 else
 	fail "pinned IP missing from status"
+fi
+
+if in_client "curl -sf -m 3 http://127.0.0.1:9922/metrics" | grep -q 'fqdn_egress_queries_total{verdict="denied"} [1-9]'; then
+	pass "metrics endpoint counts verdicts"
+else
+	fail "metrics endpoint missing or wrong counts"
 fi
 
 echo "== teardown"

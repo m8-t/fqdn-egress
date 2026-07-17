@@ -20,6 +20,18 @@ type Pinner interface {
 	Pin(ip netip.Addr, ttl time.Duration) error
 }
 
+// Stats receives what the proxy observes. Implementations must be safe
+// for concurrent use.
+type Stats interface {
+	Query(verdict string) // allowed, denied, error
+	Upstream(rtt time.Duration)
+}
+
+type noStats struct{}
+
+func (noStats) Query(string)           {}
+func (noStats) Upstream(time.Duration) {}
+
 type Config struct {
 	Listen   string
 	Upstream string
@@ -29,10 +41,11 @@ type Config struct {
 }
 
 type Proxy struct {
-	cfg  Config
-	pin  Pinner
-	list atomic.Pointer[allowlist.List]
-	log  *slog.Logger
+	cfg   Config
+	pin   Pinner
+	list  atomic.Pointer[allowlist.List]
+	log   *slog.Logger
+	stats Stats
 
 	udp    *dns.Server
 	tcp    *dns.Server
@@ -44,10 +57,21 @@ func New(cfg Config, list *allowlist.List, pin Pinner, log *slog.Logger) *Proxy 
 		cfg:    cfg,
 		pin:    pin,
 		log:    log,
+		stats:  noStats{},
 		client: &dns.Client{Timeout: 5 * time.Second},
 	}
 	p.list.Store(list)
 	return p
+}
+
+// SetStats must be called before Listen.
+func (p *Proxy) SetStats(s Stats) {
+	p.stats = s
+}
+
+// AllowlistLen reports the size of the active list.
+func (p *Proxy) AllowlistLen() int {
+	return p.list.Load().Len()
 }
 
 // SetAllowlist swaps the list; in-flight queries keep the old one.
@@ -103,6 +127,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 
 	if q.Qclass != dns.ClassINET || !p.list.Load().Match(name) {
 		p.log.Info("query denied", "name", name, "type", dns.TypeToString[q.Qtype])
+		p.stats.Query("denied")
 		p.reply(w, p.deny(req))
 		return
 	}
@@ -112,6 +137,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	if q.Qtype == dns.TypeAAAA {
 		m := new(dns.Msg)
 		m.SetReply(req)
+		p.stats.Query("allowed")
 		p.reply(w, m)
 		return
 	}
@@ -119,11 +145,13 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	resp, err := p.forward(req)
 	if err != nil {
 		p.log.Error("upstream query failed", "name", name, "err", err)
+		p.stats.Query("error")
 		m := new(dns.Msg)
 		m.SetRcode(req, dns.RcodeServerFailure)
 		p.reply(w, m)
 		return
 	}
+	p.stats.Query("allowed")
 
 	for _, rr := range resp.Answer {
 		a, ok := rr.(*dns.A)
@@ -145,11 +173,14 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 }
 
 func (p *Proxy) forward(req *dns.Msg) (*dns.Msg, error) {
-	resp, _, err := p.client.Exchange(req, p.cfg.Upstream)
+	resp, rtt, err := p.client.Exchange(req, p.cfg.Upstream)
 	if err == nil && resp.Truncated {
 		tcp := *p.client
 		tcp.Net = "tcp"
-		resp, _, err = tcp.Exchange(req, p.cfg.Upstream)
+		resp, rtt, err = tcp.Exchange(req, p.cfg.Upstream)
+	}
+	if err == nil {
+		p.stats.Upstream(rtt)
 	}
 	return resp, err
 }

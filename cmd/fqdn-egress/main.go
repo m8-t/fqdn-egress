@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -14,6 +15,7 @@ import (
 	"github.com/m8-t/fqdn-egress/internal/allowlist"
 	"github.com/m8-t/fqdn-egress/internal/config"
 	"github.com/m8-t/fqdn-egress/internal/dnsproxy"
+	"github.com/m8-t/fqdn-egress/internal/metrics"
 	"github.com/m8-t/fqdn-egress/internal/nft"
 )
 
@@ -127,7 +129,31 @@ func run(args []string) error {
 	}
 	defer p.Shutdown()
 
-	errc := make(chan error, 1)
+	errc := make(chan error, 2)
+
+	var stats *metrics.Metrics
+	if cfg.MetricsListen != "" {
+		stats = metrics.New(
+			func() float64 {
+				entries, err := m.Entries()
+				if err != nil {
+					return -1
+				}
+				return float64(len(entries))
+			},
+			func() float64 { return float64(p.AllowlistLen()) },
+		)
+		p.SetStats(stats)
+		ln, err := net.Listen("tcp", cfg.MetricsListen)
+		if err != nil {
+			return fmt.Errorf("metrics: %w", err)
+		}
+		defer ln.Close()
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", stats.Handler())
+		go func() { errc <- fmt.Errorf("metrics: %w", http.Serve(ln, mux)) }()
+	}
+
 	go func() { errc <- p.Serve() }()
 
 	sig := make(chan os.Signal, 1)
@@ -147,6 +173,9 @@ func run(args []string) error {
 					continue
 				}
 				p.SetAllowlist(l)
+				if stats != nil {
+					stats.Reload()
+				}
 				log.Info("allowlist reloaded", "entries", l.Len())
 				continue
 			}
