@@ -16,6 +16,10 @@ allowlist: /etc/fqdn-egress/allowlist.txt
 # forward mode only: interfaces whose traffic is policed.
 #interfaces: [tap0]
 
+# forward mode only: DNAT guest :53 to the proxy, so guests with a
+# hardcoded resolver still resolve through the allowlist.
+#dns_dnat: true
+
 # Clamp for how long resolved IPs stay reachable (DNS TTL clamped to this).
 ttl:
   min: 30s

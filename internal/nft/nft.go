@@ -24,12 +24,16 @@ const (
 // Ruleset describes what Install writes to the kernel.
 type Ruleset struct {
 	Mode       string
-	Interfaces []string // forward mode only
+	Interfaces []string // forward mode: police traffic entering on these
 	Carveouts  []Carveout
 	LogPrefix  string
 	// DaemonUID >= 0 adds a skuid accept so the daemon's own upstream
 	// queries are not caught by its own drop chain (output mode).
 	DaemonUID int
+	// DNSDNat redirects :53 from the policed interfaces to ProxyAddr,
+	// so guests with a hardcoded resolver still talk to the proxy.
+	DNSDNat   bool
+	ProxyAddr netip.AddrPort
 }
 
 type Carveout struct {
@@ -70,9 +74,6 @@ func New() (*Manager, error) {
 // Install replaces any previous fqdn-egress table with a fresh one:
 // timed set, default-drop chain, and the mode's rules, in one batch.
 func (m *Manager) Install(rs Ruleset) error {
-	if rs.Mode != "output" {
-		return fmt.Errorf("mode %q not implemented", rs.Mode)
-	}
 	if err := m.Teardown(); err != nil {
 		return err
 	}
@@ -81,16 +82,39 @@ func (m *Manager) Install(rs Ruleset) error {
 	if err := m.conn.AddSet(m.set, nil); err != nil {
 		return fmt.Errorf("add set: %w", err)
 	}
+
+	var hook *nftables.ChainHook
+	var rules [][]expr.Any
+	switch rs.Mode {
+	case "output":
+		hook = nftables.ChainHookOutput
+		rules = m.outputRules(rs)
+	case "forward":
+		hook = nftables.ChainHookForward
+		ifaces, err := m.addIfaceSet(rs.Interfaces)
+		if err != nil {
+			return err
+		}
+		rules = m.forwardRules(rs, ifaces)
+		if rs.DNSDNat {
+			if err := m.addDNSDNat(rs, ifaces); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("mode %q not implemented", rs.Mode)
+	}
+
 	policy := nftables.ChainPolicyDrop
 	chain := m.conn.AddChain(&nftables.Chain{
 		Name:     chainName,
 		Table:    m.table,
 		Type:     nftables.ChainTypeFilter,
-		Hooknum:  nftables.ChainHookOutput,
+		Hooknum:  hook,
 		Priority: nftables.ChainPriorityFilter,
 		Policy:   &policy,
 	})
-	for _, exprs := range m.outputRules(rs) {
+	for _, exprs := range rules {
 		m.conn.AddRule(&nftables.Rule{Table: m.table, Chain: chain, Exprs: exprs})
 	}
 	if err := m.conn.Flush(); err != nil {
@@ -159,29 +183,15 @@ func (m *Manager) FlushSet() error {
 }
 
 // outputRules builds the output-mode chain, in match order:
-// loopback, established, daemon exemption, carveouts, resolver-dodging
-// reject, allowed set, rate-limited log. Chain policy drops the rest.
+// loopback, established, daemon exemption, then the shared tail.
+// Chain policy drops the rest.
 func (m *Manager) outputRules(rs Ruleset) [][]expr.Any {
-	var rules [][]expr.Any
-
-	rules = append(rules, []expr.Any{
+	rules := [][]expr.Any{{
 		&expr.Meta{Key: expr.MetaKeyOIFNAME, Register: 1},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifname("lo")},
 		&expr.Verdict{Kind: expr.VerdictAccept},
-	})
-
-	rules = append(rules, []expr.Any{
-		&expr.Ct{Register: 1, Key: expr.CtKeySTATE},
-		&expr.Bitwise{
-			SourceRegister: 1,
-			DestRegister:   1,
-			Len:            4,
-			Mask:           binaryutil.NativeEndian.PutUint32(expr.CtStateBitESTABLISHED | expr.CtStateBitRELATED),
-			Xor:            binaryutil.NativeEndian.PutUint32(0),
-		},
-		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: []byte{0, 0, 0, 0}},
-		&expr.Verdict{Kind: expr.VerdictAccept},
-	})
+	}}
+	rules = append(rules, established())
 
 	if rs.DaemonUID >= 0 {
 		rules = append(rules, []expr.Any{
@@ -190,6 +200,27 @@ func (m *Manager) outputRules(rs Ruleset) [][]expr.Any {
 			&expr.Verdict{Kind: expr.VerdictAccept},
 		})
 	}
+
+	return append(rules, m.policedRules(rs)...)
+}
+
+// forwardRules polices only traffic entering on the configured
+// interfaces; anything else is waved through up front because the chain
+// policy drops.
+func (m *Manager) forwardRules(rs Ruleset, ifaces *nftables.Set) [][]expr.Any {
+	rules := [][]expr.Any{{
+		&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
+		&expr.Lookup{SourceRegister: 1, SetName: ifaces.Name, SetID: ifaces.ID, Invert: true},
+		&expr.Verdict{Kind: expr.VerdictAccept},
+	}}
+	rules = append(rules, established())
+	return append(rules, m.policedRules(rs)...)
+}
+
+// policedRules is the tail both modes share: carveouts, resolver-dodging
+// reject, allowed set, rate-limited log.
+func (m *Manager) policedRules(rs Ruleset) [][]expr.Any {
+	var rules [][]expr.Any
 
 	for _, co := range rs.Carveouts {
 		rules = append(rules, carveoutRule(co))
@@ -219,6 +250,76 @@ func (m *Manager) outputRules(rs Ruleset) [][]expr.Any {
 	}
 
 	return rules
+}
+
+func established() []expr.Any {
+	return []expr.Any{
+		&expr.Ct{Register: 1, Key: expr.CtKeySTATE},
+		&expr.Bitwise{
+			SourceRegister: 1,
+			DestRegister:   1,
+			Len:            4,
+			Mask:           binaryutil.NativeEndian.PutUint32(expr.CtStateBitESTABLISHED | expr.CtStateBitRELATED),
+			Xor:            binaryutil.NativeEndian.PutUint32(0),
+		},
+		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: []byte{0, 0, 0, 0}},
+		&expr.Verdict{Kind: expr.VerdictAccept},
+	}
+}
+
+func (m *Manager) addIfaceSet(names []string) (*nftables.Set, error) {
+	s := &nftables.Set{
+		Table:    m.table,
+		Name:     "ifaces",
+		KeyType:  nftables.TypeIFName,
+		Constant: true,
+	}
+	elems := make([]nftables.SetElement, len(names))
+	for i, n := range names {
+		elems[i] = nftables.SetElement{Key: ifname(n)}
+	}
+	if err := m.conn.AddSet(s, elems); err != nil {
+		return nil, fmt.Errorf("add interface set: %w", err)
+	}
+	return s, nil
+}
+
+// addDNSDNat rewrites :53 from the policed interfaces to the proxy in
+// prerouting, before the forward chain ever sees the packet.
+func (m *Manager) addDNSDNat(rs Ruleset, ifaces *nftables.Set) error {
+	if !rs.ProxyAddr.IsValid() || !rs.ProxyAddr.Addr().Is4() {
+		return fmt.Errorf("dns dnat needs an IPv4 proxy address, got %q", rs.ProxyAddr)
+	}
+	chain := m.conn.AddChain(&nftables.Chain{
+		Name:     "dstnat",
+		Table:    m.table,
+		Type:     nftables.ChainTypeNAT,
+		Hooknum:  nftables.ChainHookPrerouting,
+		Priority: nftables.ChainPriorityNATDest,
+	})
+	addr := rs.ProxyAddr.Addr().As4()
+	for _, proto := range []byte{unix.IPPROTO_UDP, unix.IPPROTO_TCP} {
+		m.conn.AddRule(&nftables.Rule{Table: m.table, Chain: chain, Exprs: []expr.Any{
+			&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
+			&expr.Lookup{SourceRegister: 1, SetName: ifaces.Name, SetID: ifaces.ID},
+			&expr.Meta{Key: expr.MetaKeyNFPROTO, Register: 1},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.NFPROTO_IPV4}},
+			&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{proto}},
+			&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.BigEndian.PutUint16(53)},
+			&expr.Immediate{Register: 1, Data: addr[:]},
+			&expr.Immediate{Register: 2, Data: binaryutil.BigEndian.PutUint16(rs.ProxyAddr.Port())},
+			&expr.NAT{
+				Type:        expr.NATTypeDestNAT,
+				Family:      unix.NFPROTO_IPV4,
+				RegAddrMin:  1,
+				RegProtoMin: 2,
+				Specified:   true,
+			},
+		}})
+	}
+	return nil
 }
 
 func carveoutRule(co Carveout) []expr.Any {

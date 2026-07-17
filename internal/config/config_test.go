@@ -51,6 +51,7 @@ listen: 172.16.0.1:53
 upstream: 172.16.20.70:53
 allowlist: /etc/fqdn-egress/allowlist.txt
 interfaces: [tap-claude0]
+dns_dnat: true
 ttl:
   min: 1m
   max: 2h
@@ -91,6 +92,8 @@ func TestLoadInvalid(t *testing.T) {
 		{"bad carveout cidr", "upstream: 1.2.3.4\nallowlist: /a\ncarveouts: [{cidr: nope}]", "cidr"},
 		{"carveout port without proto", "upstream: 1.2.3.4\nallowlist: /a\ncarveouts: [{cidr: 10.0.0.1, port: 80}]", "proto"},
 		{"unknown field", "upstream: 1.2.3.4\nallowlist: /a\nallowlst: typo", "field"},
+		{"dnat in output mode", "dns_dnat: true\nupstream: 1.2.3.4\nallowlist: /a", "dns_dnat"},
+		{"dnat with wildcard listen", "mode: forward\ninterfaces: [tap0]\ndns_dnat: true\nlisten: 0.0.0.0:53\nupstream: 1.2.3.4\nallowlist: /a", "dns_dnat"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

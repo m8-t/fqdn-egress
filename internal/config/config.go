@@ -18,6 +18,7 @@ type Config struct {
 	Upstream      string     `yaml:"upstream"`
 	Allowlist     string     `yaml:"allowlist"`
 	Interfaces    []string   `yaml:"interfaces"`
+	DNSDNat       bool       `yaml:"dns_dnat"`
 	TTL           TTL        `yaml:"ttl"`
 	Carveouts     []Carveout `yaml:"carveouts"`
 	Answer        string     `yaml:"answer"`
@@ -92,6 +93,9 @@ func (c *Config) validate() error {
 		if len(c.Interfaces) > 0 {
 			return errors.New("interfaces only apply to forward mode")
 		}
+		if c.DNSDNat {
+			return errors.New("dns_dnat only applies to forward mode")
+		}
 	case "forward":
 		if len(c.Interfaces) == 0 {
 			return errors.New("forward mode needs at least one interface")
@@ -105,6 +109,12 @@ func (c *Config) validate() error {
 	}
 	if err := hostPort(c.Listen); err != nil {
 		return fmt.Errorf("listen: %w", err)
+	}
+	if c.DNSDNat {
+		host, _, _ := net.SplitHostPort(c.Listen)
+		if ip, _ := netip.ParseAddr(host); ip.IsUnspecified() {
+			return errors.New("dns_dnat needs a concrete listen address to redirect to")
+		}
 	}
 	if c.Upstream == "" {
 		return errors.New("upstream resolver is required")

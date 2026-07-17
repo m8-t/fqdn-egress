@@ -143,11 +143,56 @@ func TestPinRejectsIPv6(t *testing.T) {
 	}
 }
 
-func TestInstallForwardNotImplemented(t *testing.T) {
+func TestInstallForward(t *testing.T) {
 	m := newPrivileged(t)
-	if err := m.Install(Ruleset{Mode: "forward", DaemonUID: -1}); err == nil {
+	rs := Ruleset{
+		Mode:       "forward",
+		Interfaces: []string{"tap0", "tap1"},
+		LogPrefix:  "test-blocked: ",
+		DaemonUID:  -1,
+		DNSDNat:    true,
+		ProxyAddr:  netip.MustParseAddrPort("172.16.0.1:53"),
+	}
+	if err := m.Install(rs); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	defer m.Teardown()
+
+	out := nftList(t)
+	for _, want := range []string{
+		"hook forward",
+		"policy drop",
+		`iifname != @ifaces accept`,
+		"ct state established,related accept",
+		"@allowed_v4 accept",
+		"hook prerouting",
+		"udp dport 53 dnat",
+		"tcp dport 53 dnat",
+		"172.16.0.1:53",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("ruleset missing %q\n%s", want, out)
+		}
+	}
+}
+
+func TestInstallForwardNoDNat(t *testing.T) {
+	m := newPrivileged(t)
+	rs := Ruleset{Mode: "forward", Interfaces: []string{"tap0"}, DaemonUID: -1}
+	if err := m.Install(rs); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	defer m.Teardown()
+	if out := nftList(t); strings.Contains(out, "prerouting") {
+		t.Errorf("unexpected nat chain without dns_dnat:\n%s", out)
+	}
+}
+
+func TestInstallUnknownMode(t *testing.T) {
+	m := newPrivileged(t)
+	if err := m.Install(Ruleset{Mode: "sideways", DaemonUID: -1}); err == nil {
 		m.Teardown()
-		t.Fatal("expected error for forward mode")
+		t.Fatal("expected error for unknown mode")
 	}
 }
 

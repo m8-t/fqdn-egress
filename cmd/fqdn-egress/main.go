@@ -163,6 +163,7 @@ func ruleset(cfg config.Config) (nft.Ruleset, error) {
 		Interfaces: cfg.Interfaces,
 		LogPrefix:  cfg.LogPrefix,
 		DaemonUID:  -1,
+		DNSDNat:    cfg.DNSDNat,
 	}
 	for _, co := range cfg.Carveouts {
 		prefix, err := netip.ParsePrefix(co.CIDR)
@@ -172,6 +173,19 @@ func ruleset(cfg config.Config) (nft.Ruleset, error) {
 		rs.Carveouts = append(rs.Carveouts, nft.Carveout{
 			Prefix: prefix, Proto: co.Proto, Port: co.Port,
 		})
+	}
+
+	// The forward chain does not police the host's own traffic, so the
+	// daemon needs no exemption there.
+	if cfg.Mode == "forward" {
+		if cfg.DNSDNat {
+			addr, err := netip.ParseAddrPort(cfg.Listen)
+			if err != nil {
+				return rs, fmt.Errorf("listen: %w", err)
+			}
+			rs.ProxyAddr = addr
+		}
+		return rs, nil
 	}
 
 	// The daemon's own upstream queries must escape the drop chain. A
