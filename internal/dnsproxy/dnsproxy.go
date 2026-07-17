@@ -7,12 +7,14 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
 
 	"github.com/m8-t/fqdn-egress/internal/allowlist"
+	"github.com/m8-t/fqdn-egress/internal/names"
 )
 
 // Pinner is the nft side: make ip reachable for ttl.
@@ -46,6 +48,7 @@ type Proxy struct {
 	list  atomic.Pointer[allowlist.List]
 	log   *slog.Logger
 	stats Stats
+	names *names.Table
 
 	udp    *dns.Server
 	tcp    *dns.Server
@@ -64,9 +67,14 @@ func New(cfg Config, list *allowlist.List, pin Pinner, log *slog.Logger) *Proxy 
 	return p
 }
 
-// SetStats must be called before Listen.
+// SetStats must be called before Serve.
 func (p *Proxy) SetStats(s Stats) {
 	p.stats = s
+}
+
+// SetNames enables name-history recording; call before Serve.
+func (p *Proxy) SetNames(t *names.Table) {
+	p.names = t
 }
 
 // AllowlistLen reports the size of the active list.
@@ -166,6 +174,9 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		if err := p.pin.Pin(ip, ttl); err != nil {
 			p.log.Error("pin failed", "ip", ip, "err", err)
 			continue
+		}
+		if p.names != nil {
+			p.names.Record(strings.TrimSuffix(name, "."), ip)
 		}
 		p.log.Debug("pinned", "name", name, "ip", ip, "ttl", ttl)
 	}

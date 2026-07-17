@@ -1,0 +1,29 @@
+# Forward mode: police a VM tap created by an orchestrator script.
+# The tap does not exist at boot, so do NOT `systemctl enable` -- have the
+# script that creates the tap run `systemctl start fqdn-egress` once the
+# interface is up and `systemctl stop` in its cleanup path (see README,
+# "When to enable, when not to").
+
+mode: forward
+interfaces: [tap0]
+
+# Host side of the tap. Guest :53 is DNATed here regardless of which
+# resolver the guest has configured.
+listen: 172.16.0.1:53
+dns_dnat: true
+
+upstream: 192.168.1.1:53
+allowlist: /etc/fqdn-egress/allowlist.txt
+
+ttl:
+  min: 30s
+  max: 1h
+
+# LAN services the guest may reach by IP, no DNS involved.
+#carveouts:
+#  - cidr: 192.168.1.10/32
+#    proto: tcp
+#    port: 8443
+
+answer: nxdomain
+log_prefix: "fqdn-egress-blocked: "

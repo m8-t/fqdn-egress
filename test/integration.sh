@@ -67,6 +67,7 @@ listen: 127.0.0.1:53
 upstream: 10.99.0.1:53
 allowlist: $work/allowlist.txt
 metrics_listen: 127.0.0.1:9922
+nflog_group: 2
 EOF
 
 # before the daemon runs, the direct-IP target must be reachable,
@@ -78,7 +79,7 @@ else
 fi
 
 echo "== daemon"
-ip netns exec $client "$work/fqdn-egress" run -c "$work/config.yaml" &
+ip netns exec $client "$work/fqdn-egress" run -c "$work/config.yaml" 2>"$work/daemon.log" &
 daemon=$!
 sleep 1
 
@@ -110,6 +111,26 @@ if in_client "curl -sf -m 3 http://127.0.0.1:9922/metrics" | grep -q 'fqdn_egres
 	pass "metrics endpoint counts verdicts"
 else
 	fail "metrics endpoint missing or wrong counts"
+fi
+
+sleep 0.5
+if grep 'egress blocked' "$work/daemon.log" | grep -q 'dst=10.99.0.3'; then
+	pass "drop logged via nflog with packet details"
+else
+	fail "no drop log line for direct IP"
+	cat "$work/daemon.log"
+fi
+
+# flush the pins, then hit an IP the proxy resolved earlier: the drop
+# log must attribute it to the domain
+ip netns exec $client "$work/fqdn-egress" flush >/dev/null
+in_client "curl -s -m 3 http://10.99.0.1/" >/dev/null || true
+sleep 0.5
+if grep 'egress blocked' "$work/daemon.log" | grep 'dst=10.99.0.1' | grep -q 'allowed.test'; then
+	pass "dropped packet attributed to domain"
+else
+	fail "no domain attribution for dropped packet"
+	cat "$work/daemon.log"
 fi
 
 echo "== teardown"

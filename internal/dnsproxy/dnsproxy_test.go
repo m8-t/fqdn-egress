@@ -12,6 +12,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/m8-t/fqdn-egress/internal/allowlist"
+	"github.com/m8-t/fqdn-egress/internal/names"
 )
 
 type fakePinner struct {
@@ -264,6 +265,21 @@ func TestStatsRecorded(t *testing.T) {
 	}
 	if stats.rtts != 1 {
 		t.Errorf("recorded %d upstream rtts, want 1", stats.rtts)
+	}
+}
+
+func TestNamesRecorded(t *testing.T) {
+	up := upstream(t, map[string][]dns.RR{
+		"example.com.": {rr(t, "example.com. 300 IN A 93.184.216.34")},
+	})
+	tab := names.New()
+	p := newProxy(t, Config{Upstream: up}, "example.com", &fakePinner{})
+	p.SetNames(tab)
+
+	query(t, p.Addr(), "example.com", dns.TypeA)
+	got := tab.Lookup(netip.MustParseAddr("93.184.216.34"))
+	if len(got) != 1 || got[0] != "example.com" {
+		t.Errorf("names = %v, want [example.com]", got)
 	}
 }
 

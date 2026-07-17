@@ -37,5 +37,11 @@ answer: nxdomain
 # Prefix for the rate-limited nftables log rule (journalctl -k | grep ...).
 log_prefix: "fqdn-egress-blocked: "
 
+# Send dropped packets to this nflog group instead of the kernel log: the
+# daemon then logs each drop itself (visible in journalctl -u), attributing
+# the destination IP to the domain(s) it was last resolved as. Replaces the
+# log_prefix kernel logging. 0 disables.
+#nflog_group: 2
+
 # Optional Prometheus endpoint; empty disables it.
 #metrics_listen: 127.0.0.1:9922

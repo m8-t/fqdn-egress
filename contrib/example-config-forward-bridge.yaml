@@ -1,0 +1,21 @@
+# Forward mode: police a permanent bridge (libvirt, systemd-networkd).
+# The bridge exists at boot, so a plain `systemctl enable --now
+# fqdn-egress` is fine here.
+
+mode: forward
+interfaces: [br0]
+
+# Bridge IP. Point the guests' DHCP-advertised DNS here, or leave
+# dns_dnat on and let the redirect catch whatever they use.
+listen: 192.168.100.1:53
+dns_dnat: true
+
+upstream: 192.168.1.1:53
+allowlist: /etc/fqdn-egress/allowlist.txt
+
+ttl:
+  min: 30s
+  max: 1h
+
+answer: nxdomain
+log_prefix: "fqdn-egress-blocked: "

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -15,7 +16,9 @@ import (
 	"github.com/m8-t/fqdn-egress/internal/allowlist"
 	"github.com/m8-t/fqdn-egress/internal/config"
 	"github.com/m8-t/fqdn-egress/internal/dnsproxy"
+	"github.com/m8-t/fqdn-egress/internal/droplog"
 	"github.com/m8-t/fqdn-egress/internal/metrics"
+	"github.com/m8-t/fqdn-egress/internal/names"
 	"github.com/m8-t/fqdn-egress/internal/nft"
 )
 
@@ -124,12 +127,21 @@ func run(args []string) error {
 		MinTTL:   time.Duration(cfg.TTL.Min),
 		MaxTTL:   time.Duration(cfg.TTL.Max),
 	}, list, m, log)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errc := make(chan error, 3)
+
+	if cfg.NFLogGroup > 0 {
+		nametab := names.New()
+		p.SetNames(nametab)
+		dl := droplog.New(uint16(cfg.NFLogGroup), nametab, log)
+		go func() { errc <- dl.Run(ctx) }()
+	}
+
 	if err := p.Listen(); err != nil {
 		return err
 	}
 	defer p.Shutdown()
-
-	errc := make(chan error, 2)
 
 	var stats *metrics.Metrics
 	if cfg.MetricsListen != "" {
@@ -193,6 +205,7 @@ func ruleset(cfg config.Config) (nft.Ruleset, error) {
 		LogPrefix:  cfg.LogPrefix,
 		DaemonUID:  -1,
 		DNSDNat:    cfg.DNSDNat,
+		NFLogGroup: cfg.NFLogGroup,
 	}
 	for _, co := range cfg.Carveouts {
 		prefix, err := netip.ParsePrefix(co.CIDR)

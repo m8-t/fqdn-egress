@@ -23,6 +23,7 @@ type Config struct {
 	Carveouts     []Carveout `yaml:"carveouts"`
 	Answer        string     `yaml:"answer"`
 	LogPrefix     string     `yaml:"log_prefix"`
+	NFLogGroup    int        `yaml:"nflog_group"`
 	MetricsListen string     `yaml:"metrics_listen"`
 }
 
@@ -145,6 +146,9 @@ func (c *Config) validate() error {
 		if err := c.Carveouts[i].validate(); err != nil {
 			return fmt.Errorf("carveout %d: %w", i+1, err)
 		}
+	}
+	if c.NFLogGroup < 0 || c.NFLogGroup > 65535 {
+		return fmt.Errorf("nflog_group must be 0-65535, got %d", c.NFLogGroup)
 	}
 	if c.MetricsListen != "" {
 		if err := hostPort(c.MetricsListen); err != nil {

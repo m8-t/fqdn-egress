@@ -176,6 +176,24 @@ func TestInstallForward(t *testing.T) {
 	}
 }
 
+func TestInstallNFLogGroup(t *testing.T) {
+	m := newPrivileged(t)
+	rs := testRuleset()
+	rs.NFLogGroup = 2
+	if err := m.Install(rs); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	defer m.Teardown()
+
+	out := nftList(t)
+	if !strings.Contains(out, "log group 2") {
+		t.Errorf("ruleset missing nflog rule:\n%s", out)
+	}
+	if strings.Contains(out, "log prefix") {
+		t.Errorf("kernel log rule should be replaced by nflog:\n%s", out)
+	}
+}
+
 func TestInstallForwardNoDNat(t *testing.T) {
 	m := newPrivileged(t)
 	rs := Ruleset{Mode: "forward", Interfaces: []string{"tap0"}, DaemonUID: -1}

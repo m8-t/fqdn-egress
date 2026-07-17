@@ -34,6 +34,9 @@ type Ruleset struct {
 	// so guests with a hardcoded resolver still talk to the proxy.
 	DNSDNat   bool
 	ProxyAddr netip.AddrPort
+	// NFLogGroup > 0 sends dropped packets to that nflog group instead
+	// of the kernel log, so the daemon can log them with DNS context.
+	NFLogGroup int
 }
 
 type Carveout struct {
@@ -242,7 +245,13 @@ func (m *Manager) policedRules(rs Ruleset) [][]expr.Any {
 		&expr.Verdict{Kind: expr.VerdictAccept},
 	))
 
-	if rs.LogPrefix != "" {
+	switch {
+	case rs.NFLogGroup > 0:
+		rules = append(rules, []expr.Any{
+			&expr.Limit{Type: expr.LimitTypePkts, Rate: 10, Unit: expr.LimitTimeMinute, Burst: 5},
+			&expr.Log{Key: 1 << unix.NFTA_LOG_GROUP, Group: uint16(rs.NFLogGroup)},
+		})
+	case rs.LogPrefix != "":
 		rules = append(rules, []expr.Any{
 			&expr.Limit{Type: expr.LimitTypePkts, Rate: 10, Unit: expr.LimitTimeMinute, Burst: 5},
 			&expr.Log{Key: 1 << unix.NFTA_LOG_PREFIX, Data: []byte(rs.LogPrefix)},

@@ -122,26 +122,17 @@ How the service should start depends on when its listen address exists:
   interface ever appears. Instead let whatever script creates the
   interface own the service lifecycle: `systemctl start fqdn-egress` after
   the interface is up, `systemctl stop` in its cleanup path (stopping also
-  removes the nft table).
+  removes the nft table). Config: `contrib/example-config-forward-tap.yaml`.
 - **Forward mode, systemd-native alternative**: bind the unit to the
-  device instead of a script. With a drop-in
-  (`systemctl edit fqdn-egress`):
-
-  ```ini
-  [Unit]
-  BindsTo=sys-subsystem-net-devices-tap0.device
-  After=sys-subsystem-net-devices-tap0.device
-  [Install]
-  WantedBy=sys-subsystem-net-devices-tap0.device
-  ```
-
-  then `systemctl enable fqdn-egress` makes it follow the interface: start
-  when tap0 appears, stop when it vanishes. (Interface names with dashes
-  need systemd escaping: `tap-claude` becomes `tap\x2dclaude`, check with
-  `systemd-escape -p --suffix=device tap-claude`.)
+  device instead of a script, then `systemctl enable` makes it follow the
+  interface: start when it appears, stop when it vanishes. Drop-in with
+  install notes: `contrib/example-dropin-device-bound.conf`. (Interface
+  names with dashes need systemd escaping: `tap-claude` becomes
+  `tap\x2dclaude`, check with `systemd-escape --suffix=device tap-claude`.)
 - **Forward mode on a permanent bridge** (interface exists at boot, e.g.
   managed by systemd-networkd): plain `enable` works; the unit already
-  orders itself after `network-online.target`.
+  orders itself after `network-online.target`. Config:
+  `contrib/example-config-forward-bridge.yaml`.
 - **Ad-hoc / testing**: skip systemd entirely, `sudo fqdn-egress run -c
   cfg.yaml -d` in a terminal. Ctrl-C tears the ruleset down. Running as
   root swaps the uid self-exemption for an automatic upstream-resolver
@@ -164,6 +155,7 @@ every knob:
 | `carveouts` | - | static CIDR(+proto+port) accepts, for IP-only destinations |
 | `answer` | `nxdomain` | reply for denied names: `nxdomain` or `refuse` |
 | `log_prefix` | `fqdn-egress-blocked: ` | kernel log prefix for dropped packets |
+| `nflog_group` | off | log drops from the daemon instead, with domain attribution |
 | `metrics_listen` | off | Prometheus endpoint address |
 
 Allowlist: one name per line, `#` comments, `*.example.com` wildcards
@@ -178,9 +170,21 @@ fqdn-egress flush   clear pinned IPs
 ```
 
 Denied and dropped traffic is observable in three places: structured logs
-(denied queries), `journalctl -k | grep fqdn-egress-blocked` (dropped
-packets, rate-limited), and `/metrics` (queries by verdict, upstream
-latency, pinned set size).
+(denied queries), dropped packets, and `/metrics` (queries by verdict,
+upstream latency, pinned set size). Dropped packets go to the kernel log by
+default (`journalctl -k | grep fqdn-egress-blocked`, rate-limited); with
+`nflog_group` set the daemon consumes them itself and logs each drop with
+the domain the destination was last resolved as:
+
+```
+level=WARN msg="egress blocked" src=172.16.0.2 dst=140.82.121.4 proto=tcp
+    dport=443 resolved_as=[github.com]
+```
+
+An IP that never went through the proxy shows `resolved_as="never (direct
+IP?)"` -- the tell for hardcoded-IP egress attempts. Name history is kept
+for 24h, deliberately longer than any pin: attribution matters most when a
+pin has already expired.
 
 ## Threat model
 
