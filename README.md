@@ -23,17 +23,23 @@ to the real resolver and the answered IPs are pinned into an nftables set
 for the duration of their DNS TTL. Everything else -- unknown names, raw
 IPs, other resolvers -- hits a default-drop chain.
 
-```
- app ──── DNS query ────> proxy ── allowed? ──> upstream resolver
-                            │                        │
-                            │ no                     │ A records
-                            v                        v
-                         NXDOMAIN            pin IP (TTL) ──> nft set
-                                                              │
- app ──── connect ───────────────────── daddr in set? ────────┘
-                                          │        │
-                                         yes       no
-                                        accept    drop
+```mermaid
+flowchart LR
+    app[app]
+    proxy[dns proxy]
+    upstream[upstream resolver]
+    set[(nft set)]
+    verdict{daddr in set?}
+
+    app -- DNS query --> proxy
+    proxy -- allowed --> upstream
+    proxy -- denied --> nx[NXDOMAIN]
+    upstream -- A records --> proxy
+    proxy -- pin IP, DNS TTL --> set
+    app -- connect --> verdict
+    set -.-> verdict
+    verdict -- yes --> accept[accept]
+    verdict -- no --> drop[drop]
 ```
 
 A client that resolves elsewhere (DoH, hardcoded IPs) still cannot connect:
