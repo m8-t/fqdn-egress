@@ -83,13 +83,29 @@ DNS=127.0.0.1
 DNSStubListener=no
 ```
 
-For a permanent install use the hardened unit in `contrib/`, which runs the
-daemon as a dedicated non-root user with `CAP_NET_ADMIN`:
+For a permanent install use the systemd unit, see below.
+
+## Running as a service
+
+`contrib/fqdn-egress.service` runs the daemon without root: a dedicated
+`fqdn-egress` system user plus two ambient capabilities, `CAP_NET_ADMIN`
+for the nftables ruleset and `CAP_NET_BIND_SERVICE` for binding port 53.
+Running non-root also gives the daemon a clean self-exemption: its own
+upstream queries are accepted by source uid instead of a resolver
+carve-out. The rest of the unit is standard hardening (`ProtectSystem=strict`,
+syscall filter, no new privileges); `systemctl reload` sends the SIGHUP
+that reloads the allowlist.
 
 ```
+go build -o /usr/local/bin/fqdn-egress ./cmd/fqdn-egress
+mkdir -p /etc/fqdn-egress   # config.yaml + allowlist.txt go here
 cp contrib/fqdn-egress.sysusers /usr/lib/sysusers.d/fqdn-egress.conf && systemd-sysusers
-cp contrib/fqdn-egress.service /etc/systemd/system/ && systemctl enable --now fqdn-egress
+cp contrib/fqdn-egress.service /etc/systemd/system/
+systemctl enable --now fqdn-egress
 ```
+
+Edit the allowlist, then `systemctl reload fqdn-egress` -- the ruleset and
+already-pinned IPs stay in place.
 
 ## Configuration
 
