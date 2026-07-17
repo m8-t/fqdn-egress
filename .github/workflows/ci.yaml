@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - name: vet
+        run: go vet ./...
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: unit tests
+        run: go test -race ./...
+      - name: install nftables cli
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq nftables
+      # throwaway netns so the default-drop chain never lands on the runner
+      - name: kernel tests
+        run: >-
+          sudo env "PATH=$PATH" "HOME=$HOME"
+          unshare -n go test ./internal/nft/ -count=1
+      - name: integration output mode
+        run: sudo env "PATH=$PATH" "HOME=$HOME" test/integration.sh
+      - name: integration forward mode
+        run: sudo env "PATH=$PATH" "HOME=$HOME" test/integration-forward.sh
