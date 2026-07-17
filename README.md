@@ -109,6 +109,44 @@ systemctl enable --now fqdn-egress
 Edit the allowlist, then `systemctl reload fqdn-egress` -- the ruleset and
 already-pinned IPs stay in place.
 
+### When to enable, when not to
+
+How the service should start depends on when its listen address exists:
+
+- **Output mode on a server or CI box** -- `listen: 127.0.0.1:53` is always
+  bindable, so `systemctl enable --now fqdn-egress` and forget about it.
+  This is the setup above.
+- **Forward mode on an interface an orchestrator creates** (VM tap, netns
+  veth): do *not* enable the unit. At boot the tap doesn't exist, the bind
+  fails, and the restart loop trips systemd's start limit before the
+  interface ever appears. Instead let whatever script creates the
+  interface own the service lifecycle: `systemctl start fqdn-egress` after
+  the interface is up, `systemctl stop` in its cleanup path (stopping also
+  removes the nft table).
+- **Forward mode, systemd-native alternative**: bind the unit to the
+  device instead of a script. With a drop-in
+  (`systemctl edit fqdn-egress`):
+
+  ```ini
+  [Unit]
+  BindsTo=sys-subsystem-net-devices-tap0.device
+  After=sys-subsystem-net-devices-tap0.device
+  [Install]
+  WantedBy=sys-subsystem-net-devices-tap0.device
+  ```
+
+  then `systemctl enable fqdn-egress` makes it follow the interface: start
+  when tap0 appears, stop when it vanishes. (Interface names with dashes
+  need systemd escaping: `tap-claude` becomes `tap\x2dclaude`, check with
+  `systemd-escape -p --suffix=device tap-claude`.)
+- **Forward mode on a permanent bridge** (interface exists at boot, e.g.
+  managed by systemd-networkd): plain `enable` works; the unit already
+  orders itself after `network-online.target`.
+- **Ad-hoc / testing**: skip systemd entirely, `sudo fqdn-egress run -c
+  cfg.yaml -d` in a terminal. Ctrl-C tears the ruleset down. Running as
+  root swaps the uid self-exemption for an automatic upstream-resolver
+  carve-out, so it behaves the same.
+
 ## Configuration
 
 One YAML file, one flat allowlist. `contrib/example-config.yaml` documents
