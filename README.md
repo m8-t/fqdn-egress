@@ -1,5 +1,7 @@
 # fqdn-egress
 
+[![ci](https://github.com/m8-t/fqdn-egress/actions/workflows/ci.yaml/badge.svg)](https://github.com/m8-t/fqdn-egress/actions/workflows/ci.yaml)
+
 FQDN-based egress firewall for Linux. One daemon that enforces "this machine
 may only talk to these domain names" using nftables and a built-in DNS
 forwarding proxy. No MITM, no proxy certificates, no per-application setup.

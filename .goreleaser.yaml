@@ -1,0 +1,30 @@
+version: 2
+
+builds:
+  - main: ./cmd/fqdn-egress
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - files:
+      - LICENSE
+      - README.md
+      - contrib/*
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs"
+      - "^ci"
+      - "^chore"
