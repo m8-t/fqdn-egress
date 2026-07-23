@@ -199,7 +199,8 @@ func TestCNAMEChainPinsARecords(t *testing.T) {
 	up := upstream(t, map[string][]dns.RR{
 		"www.example.com.": {
 			rr(t, "www.example.com. 300 IN CNAME cdn.example.net."),
-			rr(t, "cdn.example.net. 60 IN A 198.51.100.7"),
+			rr(t, "edge.example.net. 60 IN A 198.51.100.7"),
+			rr(t, "cdn.example.net. 300 IN CNAME edge.example.net."),
 		},
 	})
 	pin := &fakePinner{}
@@ -208,6 +209,74 @@ func TestCNAMEChainPinsARecords(t *testing.T) {
 	query(t, p.Addr(), "www.example.com", dns.TypeA)
 	if _, ok := pin.get("198.51.100.7"); !ok {
 		t.Error("A record behind CNAME not pinned")
+	}
+}
+
+func TestUnrelatedAnswerNotPinned(t *testing.T) {
+	up := upstream(t, map[string][]dns.RR{
+		"example.com.": {
+			rr(t, "example.com. 300 IN A 93.184.216.34"),
+			rr(t, "unrelated.test. 300 IN A 192.0.2.1"),
+		},
+	})
+	pin := &fakePinner{}
+	p := newProxy(t, Config{Upstream: up}, "example.com", pin)
+
+	query(t, p.Addr(), "example.com", dns.TypeA)
+	if _, ok := pin.get("93.184.216.34"); !ok {
+		t.Error("matching A record not pinned")
+	}
+	if _, ok := pin.get("192.0.2.1"); ok {
+		t.Error("unrelated A record pinned")
+	}
+}
+
+func TestServeStopsBothServersOnError(t *testing.T) {
+	up := upstream(t, map[string][]dns.RR{
+		"example.com.": {rr(t, "example.com. 300 IN A 93.184.216.34")},
+	})
+	list, err := allowlist.Parse(strings.NewReader("example.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := New(Config{
+		Listen:   "127.0.0.1:0",
+		Upstream: up,
+		Answer:   "nxdomain",
+		MinTTL:   30 * time.Second,
+		MaxTTL:   time.Hour,
+	}, list, &fakePinner{}, slog.New(slog.DiscardHandler))
+	if err := p.Listen(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.Shutdown)
+
+	errc := make(chan error, 1)
+	go func() { errc <- p.Serve() }()
+
+	req := new(dns.Msg)
+	req.SetQuestion("example.com.", dns.TypeA)
+	client := &dns.Client{Net: "tcp", Timeout: 2 * time.Second}
+	if _, _, err := client.Exchange(req, p.tcp.Listener.Addr().String()); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.udp.PacketConn.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("Serve returned nil error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return")
+	}
+
+	conn, err := net.DialTimeout("tcp", p.tcp.Listener.Addr().String(), 100*time.Millisecond)
+	if err == nil {
+		conn.Close()
+		t.Fatal("TCP server still accepting connections")
 	}
 }
 

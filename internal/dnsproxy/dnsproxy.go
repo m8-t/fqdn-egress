@@ -108,7 +108,9 @@ func (p *Proxy) Serve() error {
 	errc := make(chan error, 2)
 	go func() { errc <- p.udp.ActivateAndServe() }()
 	go func() { errc <- p.tcp.ActivateAndServe() }()
-	return <-errc
+	err := <-errc
+	p.Shutdown()
+	return err
 }
 
 // Addr returns the bound UDP address, useful when listening on port 0.
@@ -161,9 +163,36 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	}
 	p.stats.Query("allowed")
 
+	validNames := map[string]struct{}{
+		strings.ToLower(dns.Fqdn(name)): {},
+	}
+	for {
+		added := false
+		for _, rr := range resp.Answer {
+			cname, ok := rr.(*dns.CNAME)
+			if !ok {
+				continue
+			}
+			if _, ok := validNames[strings.ToLower(dns.Fqdn(cname.Hdr.Name))]; !ok {
+				continue
+			}
+			target := strings.ToLower(dns.Fqdn(cname.Target))
+			if _, ok := validNames[target]; !ok {
+				validNames[target] = struct{}{}
+				added = true
+			}
+		}
+		if !added {
+			break
+		}
+	}
+
 	for _, rr := range resp.Answer {
 		a, ok := rr.(*dns.A)
 		if !ok {
+			continue
+		}
+		if _, ok := validNames[strings.ToLower(dns.Fqdn(a.Hdr.Name))]; !ok {
 			continue
 		}
 		ip, ok := netip.AddrFromSlice(a.A.To4())
